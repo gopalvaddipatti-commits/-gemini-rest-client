@@ -1,4 +1,5 @@
 import re
+import time
 import requests
 import streamlit as st
 from google import genai
@@ -86,36 +87,45 @@ if prompt := st.chat_input(
   with st.chat_message("user"):
     st.markdown(prompt)
 
-  # Check if user gave a link, if yes fetch docs
   url, fetched_content = fetch_docs_from_url(prompt)
   full_prompt = prompt + fetched_content
 
   with st.chat_message("assistant"):
-    with st.spinner("AI documentation analyse korche..."):
-      try:
-        # Build contents from prior chat history for context
-        contents = []
-        for msg in st.session_state.messages[:-1]:
-          contents.append(f"{msg['role'].capitalize()}: {msg['content']}")
-        contents.append(f"User: {full_prompt}")
+    with st.spinner("AI processing..."):
+      ai_response = None
+      # List of stable fallback models to try automatically
+      models_to_try = ["gemini-1.5-flash", "gemini-1.5-pro"]
 
-        # Send request using the exact model recommended by the API
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents="\n\n".join(contents),
-            config=genai.types.GenerateContentConfig(
-                system_instruction=system_instruction
-            ),
-        )
+      for model_name in models_to_try:
+        try:
+          contents = []
+          for msg in st.session_state.messages[:-1]:
+            contents.append(f"{msg['role'].capitalize()}: {msg['content']}")
+          contents.append(f"User: {full_prompt}")
 
-        ai_response = response.text
+          response = client.models.generate_content(
+              model=model_name,
+              contents="\n\n".join(contents),
+              config=genai.types.GenerateContentConfig(
+                  system_instruction=system_instruction
+              ),
+          )
+          ai_response = response.text
+          break  # Success, exit loop
+        except Exception as e:
+          # Try next model if current one fails or is unavailable
+          continue
+
+      if ai_response:
         st.markdown(ai_response)
         st.session_state.messages.append(
             {"role": "assistant", "content": ai_response}
         )
-
-      except Exception as e:
-        error_msg = f"Kono somoshya hoyeche: {e}"
+      else:
+        error_msg = (
+            "Kono somoshya hoyeche: Shobkoyti AI model ekhon busy ache."
+            " Onugroho kore kichukhon por abar chesta korun."
+        )
         st.error(error_msg)
         st.session_state.messages.append(
             {"role": "assistant", "content": error_msg}
