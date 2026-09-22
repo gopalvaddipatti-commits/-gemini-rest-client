@@ -46,10 +46,7 @@ Your tasks:
 6. Be helpful, concise, and reply in Bengali or English based on how the user speaks.
 """
 
-# Initialize Chat Session State
-if "chat_history" not in st.session_state:
-  st.session_state.chat_history = []
-
+# Initialize Chat History for UI Display
 if "messages" not in st.session_state:
   st.session_state.messages = []
 
@@ -93,34 +90,28 @@ if prompt := st.chat_input(
   url, fetched_content = fetch_docs_from_url(prompt)
   full_prompt = prompt + fetched_content
 
-  # Append user message to conversation history
-  st.session_state.chat_history.append({"role": "user", "parts": [full_prompt]})
-
   with st.chat_message("assistant"):
     with st.spinner("AI documentation analyse korche..."):
       try:
-        # Call Gemini using standard model
-        response = client.chats.create(
-            model="gemini-2.5-flash",
-            history=st.session_state.chat_history[
-                :-1
-            ],  # pass past history except latest
+        # Build contents from prior chat history for context
+        contents = []
+        for msg in st.session_state.messages[:-1]:
+          contents.append(f"{msg['role'].capitalize()}: {msg['content']}")
+        contents.append(f"User: {full_prompt}")
+
+        # Send request using the exact model recommended by the API
+        response = client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents="\n\n".join(contents),
             config=genai.types.GenerateContentConfig(
                 system_instruction=system_instruction
             ),
         )
-        # Send latest message
-        chat_resp = response.send_message(full_prompt)
-        ai_response = chat_resp.text
 
+        ai_response = response.text
         st.markdown(ai_response)
         st.session_state.messages.append(
             {"role": "assistant", "content": ai_response}
-        )
-
-        # Update chat history state
-        st.session_state.chat_history.append(
-            {"role": "model", "parts": [ai_response]}
         )
 
       except Exception as e:
