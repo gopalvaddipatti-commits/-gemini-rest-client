@@ -1,8 +1,7 @@
 import re
-import time
 import requests
 import streamlit as st
-from google import genai
+import google.generativeai as genai
 
 # Page Config
 st.set_page_config(
@@ -32,8 +31,8 @@ if not gemini_api_key:
   st.warning("Onugroho kore age sidebar theke apnar Gemini API Key-ti din.")
   st.stop()
 
-# Initialize Gemini Client using modern SDK
-client = genai.Client(api_key=gemini_api_key)
+# Configure Gemini with old, reliable library
+genai.configure(api_key=gemini_api_key)
 
 # System Instructions
 system_instruction = """
@@ -47,7 +46,15 @@ Your tasks:
 6. Be helpful, concise, and reply in Bengali or English based on how the user speaks.
 """
 
-# Initialize Chat History for UI Display
+# Initialize model
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash", system_instruction=system_instruction
+)
+
+# Initialize chat session state
+if "chat_session" not in st.session_state:
+  st.session_state.chat_session = model.start_chat(history=[])
+
 if "messages" not in st.session_state:
   st.session_state.messages = []
 
@@ -91,41 +98,16 @@ if prompt := st.chat_input(
   full_prompt = prompt + fetched_content
 
   with st.chat_message("assistant"):
-    with st.spinner("AI processing..."):
-      ai_response = None
-      # List of stable fallback models to try automatically
-      models_to_try = ["gemini-1.5-flash", "gemini-1.5-pro"]
-
-      for model_name in models_to_try:
-        try:
-          contents = []
-          for msg in st.session_state.messages[:-1]:
-            contents.append(f"{msg['role'].capitalize()}: {msg['content']}")
-          contents.append(f"User: {full_prompt}")
-
-          response = client.models.generate_content(
-              model=model_name,
-              contents="\n\n".join(contents),
-              config=genai.types.GenerateContentConfig(
-                  system_instruction=system_instruction
-              ),
-          )
-          ai_response = response.text
-          break  # Success, exit loop
-        except Exception as e:
-          # Try next model if current one fails or is unavailable
-          continue
-
-      if ai_response:
+    with st.spinner("AI response generate korche..."):
+      try:
+        response = st.session_state.chat_session.send_message(full_prompt)
+        ai_response = response.text
         st.markdown(ai_response)
         st.session_state.messages.append(
             {"role": "assistant", "content": ai_response}
         )
-      else:
-        error_msg = (
-            "Kono somoshya hoyeche: Shobkoyti AI model ekhon busy ache."
-            " Onugroho kore kichukhon por abar chesta korun."
-        )
+      except Exception as e:
+        error_msg = f"Kono somoshya hoyeche: {e}"
         st.error(error_msg)
         st.session_state.messages.append(
             {"role": "assistant", "content": error_msg}
