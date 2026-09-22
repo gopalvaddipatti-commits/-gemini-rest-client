@@ -46,9 +46,9 @@ Your tasks:
 6. Be helpful, concise, and reply in Bengali or English based on how the user speaks.
 """
 
-# Using 'gemini-1.5-flash' which is globally stable and standard across all standard API tiers
+# Using the exact model recommended by the API error message
 model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash", system_instruction=system_instruction
+    model_name="gemini-3.6-flash", system_instruction=system_instruction
 )
 
 # Initialize Chat Session State
