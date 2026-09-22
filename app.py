@@ -1,7 +1,7 @@
 import re
 import requests
 import streamlit as st
-from google import genai
+import google.generativeai as genai
 
 # Page Config
 st.set_page_config(
@@ -31,8 +31,8 @@ if not gemini_api_key:
   st.warning("Onugroho kore age sidebar theke apnar Gemini API Key-ti din.")
   st.stop()
 
-# Initialize Gemini Client using modern SDK
-client = genai.Client(api_key=gemini_api_key)
+# Configure using standard google-generativeai package
+genai.configure(api_key=gemini_api_key)
 
 # System Instructions
 system_instruction = """
@@ -46,7 +46,15 @@ Your tasks:
 6. Be helpful, concise, and reply in Bengali or English based on how the user speaks.
 """
 
-# Initialize Chat History for UI Display
+# Using 'gemini-1.5-flash' which is globally stable and standard across all standard API tiers
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash", system_instruction=system_instruction
+)
+
+# Initialize Chat Session State
+if "chat_session" not in st.session_state:
+  st.session_state.chat_session = model.start_chat(history=[])
+
 if "messages" not in st.session_state:
   st.session_state.messages = []
 
@@ -92,25 +100,12 @@ if prompt := st.chat_input(
   with st.chat_message("assistant"):
     with st.spinner("AI response generate korche..."):
       try:
-        contents = []
-        for msg in st.session_state.messages[:-1]:
-          contents.append(f"{msg['role'].capitalize()}: {msg['content']}")
-        contents.append(f"User: {full_prompt}")
-
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents="\n\n".join(contents),
-            config=genai.types.GenerateContentConfig(
-                system_instruction=system_instruction
-            ),
-        )
-
+        response = st.session_state.chat_session.send_message(full_prompt)
         ai_response = response.text
         st.markdown(ai_response)
         st.session_state.messages.append(
             {"role": "assistant", "content": ai_response}
         )
-
       except Exception as e:
         error_msg = f"Kono somoshya hoyeche: {e}"
         st.error(error_msg)
