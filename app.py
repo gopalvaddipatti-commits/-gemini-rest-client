@@ -3,10 +3,10 @@ from groq import Groq
 import requests
 import json
 
-st.set_page_config(page_title="Conversational API Tester", page_icon="🤖")
+st.set_page_config(page_title="Conversational API Tester", page_icon="🤖", layout="centered")
 st.title("🤖 AI API Testing Assistant")
 
-# Groq API Key সেটআপ (সাইডবার বা সিক্রেট থেকে)
+# Groq API Key সেটআপ (সাইডবার বা Streamlit Secrets থেকে)
 groq_api_key = ""
 try:
     groq_api_key = st.secrets["GROQ_API_KEY"]
@@ -14,7 +14,7 @@ except:
     groq_api_key = st.sidebar.text_input("Groq API Key দিন:", type="password")
 
 if not groq_api_key:
-    st.warning("চালু করার জন্য দয়া করে সাইডবারে আপনার Groq API Key দিন।")
+    st.warning("অ্যাপটি ব্যবহার করতে অনুগ্রহ করে সাইডবারে আপনার Groq API Key দিন।")
     st.stop()
 
 client = Groq(api_key=groq_api_key)
@@ -22,7 +22,7 @@ client = Groq(api_key=groq_api_key)
 # চ্যাট হিস্ট্রি সেভ করার জন্য সেশন স্টেট ইনিশিয়ালাইজ করা
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "হ্যালো! আপনি কোন ওয়েবসাইটের বা সার্ভিসের REST API টেস্ট করতে চান? শুধু সেটির নাম বা ডকসের লিংক দিন।"}
+        {"role": "assistant", "content": "হ্যালো! আপনি কোন ওয়েবসাইটের বা সার্ভিসের REST API টেস্ট করতে চান? শুধু সেটির নাম দিন।"}
     ]
 
 # আগের সব চ্যাট মেসেজ স্ক্রিনে দেখানো
@@ -41,19 +41,26 @@ if user_input := st.chat_input("এখানে আপনার মেসেজ 
     with st.chat_message("assistant"):
         with st.spinner("ভেবে দেখছি..."):
             try:
-                # Groq মডেলকে কল করে চ্যাট কনটেক্সট পাঠানো
+                # Groq মডেলকে কল করা (এখানে সচল মডেল হিসেবে 'llama-3.1-8b-instant' ব্যবহার করা হয়েছে)
                 response = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
+                    model="llama-3.1-8b-instant",
                     messages=[
                         {
                             "role": "system", 
-                            "content": "You are a helpful AI API Testing Assistant. Your job is to converse with the user step-by-step. First, ask for the service name. Once they give it, analyze what credentials (Client ID, Secret, API Key) or endpoint details are needed, and ask the user for them conversationally. Guide them like an interactive assistant."
+                            "content": (
+                                "You are a helpful AI API Testing Assistant. "
+                                "Your job is to converse with the user step-by-step. "
+                                "First, ask for the service name. Once they give it, "
+                                "analyze what credentials (Client ID, Secret, API Key) or endpoint details are needed, "
+                                "and ask the user for them conversationally. Guide them like an interactive assistant."
+                            )
                         }
                     ] + st.session_state.messages,
                     temperature=0.3,
                 )
                 
-                ai_reply = response.choices.message.content
+                # সঠিক উপায়ে রেসপন্স টেক্সট ফেচ করা
+                ai_reply = response.choices[0].message.content
                 st.markdown(ai_reply)
                 
                 # এআই-এর রিপ্লাই হিস্টরিতে সেভ করা
