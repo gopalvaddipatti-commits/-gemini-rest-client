@@ -1,77 +1,63 @@
 import streamlit as st
 from groq import Groq
+import requests
 import json
 
-st.set_page_config(page_title="AI REST API Tester", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Conversational API Tester", page_icon="🤖")
+st.title("🤖 AI API Testing Assistant")
 
-st.title("🤖 Groq AI Autonomous REST API Tester")
-st.write("সার্ভিসের নাম দিন এবং কী করতে চান তা লিখুন। Groq (Llama 3) ব্যাকগ্রাউন্ডে কোড জেনারেট করে API টেস্ট করবে!")
-
-# ১. API Key ম্যানেজমেন্ট (Streamlit Secrets অথবা ইউজার ইনপুট)
+# Groq API Key সেটআপ (সাইডবার বা সিক্রেট থেকে)
 groq_api_key = ""
 try:
     groq_api_key = st.secrets["GROQ_API_KEY"]
 except:
-    groq_api_key = st.sidebar.text_input("আপনার Groq API Key দিন:", type="password")
+    groq_api_key = st.sidebar.text_input("Groq API Key দিন:", type="password")
 
-# মডেল সিলেকশন ড্রপডাউন
-model_choice = st.sidebar.selectbox(
-    "মডেল সিলেক্ট করুন:",
-    ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-)
+if not groq_api_key:
+    st.warning("চালু করার জন্য দয়া করে সাইডবারে আপনার Groq API Key দিন।")
+    st.stop()
 
-# ইউজার ইনপুট ফিল্ডস
-col1, col2 = st.columns(2)
-with col1:
-    service_name = st.text_input("সার্ভিস বা সাইটের নাম (যেমন: GitHub, Spotify):", value="GitHub")
-with col2:
-    user_task = st.text_input("টাস্ক বা রিকোয়েস্টের বিবরণ (যেমন: Get user profile of 'octocat'):", value="Get user profile of octocat")
+client = Groq(api_key=groq_api_key)
 
-auth_token = st.text_input("অথেন্টিকেশন টোকেন বা API Key (যদি লাগে):", type="password")
+# চ্যাট হিস্ট্রি সেভ করার জন্য সেশন স্টেট ইনিশিয়ালাইজ করা
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": "হ্যালো! আপনি কোন ওয়েবসাইটের বা সার্ভিসের REST API টেস্ট করতে চান? শুধু সেটির নাম বা ডকসের লিংক দিন।"}
+    ]
 
-if st.button("Run AI API Test"):
-    if not groq_api_key:
-        st.error("দয়া করে আপনার Groq API Key প্রদান করুন (Sidebar অথবা Streamlit Secrets-এ)।")
-    elif not service_name or not user_task:
-        st.warning("দয়া করে সার্ভিস নাম এবং টাস্ক ফিল্ড পূরণ করুন।")
-    else:
-        with st.spinner(f"Groq ({model_choice}) কাজ করছে... কোড তৈরি করা হচ্ছে..."):
+# আগের সব চ্যাট মেসেজ স্ক্রিনে দেখানো
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# ইউজারের ইনপুট নেওয়ার চ্যাট বক্স
+if user_input := st.chat_input("এখানে আপনার মেসেজ লিখুন..."):
+    # ইউজারের মেসেজ চ্যাটে যোগ করা
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    # AI রেসপন্স জেনারেট করা
+    with st.chat_message("assistant"):
+        with st.spinner("ভেবে দেখছি..."):
             try:
-                # Groq ক্লায়েন্ট ইনিশিয়ালাইজ করা
-                client = Groq(api_key=groq_api_key)
-                
-                # প্রম্পট তৈরি যা মডেলকে পাইথন কোড লিখতে নির্দেশ দেবে
-                prompt = f"""
-                You are an expert AI Python Developer and API Tester.
-                The user wants to test an API for the service: '{service_name}'.
-                Task description: '{user_task}'
-                Auth Token/Key provided: '{auth_token}' (Include this in headers if provided).
-                
-                Write a complete, executable Python script using the 'requests' library to perform this API call. 
-                Ensure you print the HTTP Status Code and the JSON response clearly using python print statements.
-                Return ONLY the executable Python code inside a markdown code block (```python ... ```). Do not add extra text outside the code block.
-                """
-                
-                chat_completion = client.chat.completions.create(
+                # Groq মডেলকে কল করে চ্যাট কনটেক্সট পাঠানো
+                response = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
                     messages=[
                         {
-                            "role": "user",
-                            "content": prompt,
+                            "role": "system", 
+                            "content": "You are a helpful AI API Testing Assistant. Your job is to converse with the user step-by-step. First, ask for the service name. Once they give it, analyze what credentials (Client ID, Secret, API Key) or endpoint details are needed, and ask the user for them conversationally. Guide them like an interactive assistant."
                         }
-                    ],
-                    model=model_choice,
-                    temperature=0.1,
+                    ] + st.session_state.messages,
+                    temperature=0.3,
                 )
                 
-                ai_output = chat_completion.choices[0].message.content
+                ai_reply = response.choices.message.content
+                st.markdown(ai_reply)
                 
-                st.success("AI কোড জেনারেট সম্পন্ন হয়েছে!")
-                
-                # জেনারেট হওয়া কোড স্ক্রিনে দেখানো
-                st.markdown("### 📝 AI Generated Python Code:")
-                st.markdown(ai_output)
-                
-                # ভবিষ্যতে এখানে আপনি কোড রান করার অংশ (exec বা subprocess) যুক্ত করতে পারেন
+                # এআই-এর রিপ্লাই হিস্টরিতে সেভ করা
+                st.session_state.messages.append({"role": "assistant", "content": ai_reply})
                 
             except Exception as e:
-                st.error(e)
+                st.error(f"এরর হয়েছে: {e}")
