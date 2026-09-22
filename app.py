@@ -41,9 +41,9 @@ if user_input := st.chat_input("এখানে আপনার মেসেজ 
     with st.chat_message("assistant"):
         with st.spinner("ভেবে দেখছি..."):
             try:
-                # Groq মডেলকে কল করা (এখানে সচল মডেল হিসেবে 'llama-3.1-8b-instant' ব্যবহার করা হয়েছে)
+                # Groq মডেল কল করা (আপডেটেড সঠিক মডেল আইডি ব্যবহার করা হয়েছে)
                 response = client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
+                    model="openai/gpt-oss-20b",
                     messages=[
                         {
                             "role": "system", 
