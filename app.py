@@ -1,7 +1,7 @@
 import re
 import requests
 import streamlit as st
-import google.generativeai as genai
+from google import genai
 
 # Page Config
 st.set_page_config(
@@ -31,10 +31,10 @@ if not gemini_api_key:
   st.warning("Onugroho kore age sidebar theke apnar Gemini API Key-ti din.")
   st.stop()
 
-# Configure Gemini
-genai.configure(api_key=gemini_api_key)
+# Initialize Gemini Client using modern SDK
+client = genai.Client(api_key=gemini_api_key)
 
-# Advanced System Instructions for Gemini
+# System Instructions
 system_instruction = """
 You are an expert AI API Assistant, Documentation Finder, and REST Client Builder. 
 Your tasks:
@@ -46,16 +46,10 @@ Your tasks:
 6. Be helpful, concise, and reply in Bengali or English based on how the user speaks.
 """
 
-# Initialize Gemini Model with System Instruction
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-pro", system_instruction=system_instruction
-)
+# Initialize Chat Session State
+if "chat_history" not in st.session_state:
+  st.session_state.chat_history = []
 
-# Initialize Chat Session in Streamlit Session State
-if "chat_session" not in st.session_state:
-  st.session_state.chat_session = model.start_chat(history=[])
-
-# Initialize Chat History for UI Display
 if "messages" not in st.session_state:
   st.session_state.messages = []
 
@@ -95,19 +89,40 @@ if prompt := st.chat_input(
   with st.chat_message("user"):
     st.markdown(prompt)
 
-  # Check if user gave a link, if yes fetch docs; otherwise let Gemini handle the service name
+  # Check if user gave a link, if yes fetch docs
   url, fetched_content = fetch_docs_from_url(prompt)
   full_prompt = prompt + fetched_content
+
+  # Append user message to conversation history
+  st.session_state.chat_history.append({"role": "user", "parts": [full_prompt]})
 
   with st.chat_message("assistant"):
     with st.spinner("AI documentation analyse korche..."):
       try:
-        response = st.session_state.chat_session.send_message(full_prompt)
-        ai_response = response.text
+        # Call Gemini using standard model
+        response = client.chats.create(
+            model="gemini-2.5-flash",
+            history=st.session_state.chat_history[
+                :-1
+            ],  # pass past history except latest
+            config=genai.types.GenerateContentConfig(
+                system_instruction=system_instruction
+            ),
+        )
+        # Send latest message
+        chat_resp = response.send_message(full_prompt)
+        ai_response = chat_resp.text
+
         st.markdown(ai_response)
         st.session_state.messages.append(
             {"role": "assistant", "content": ai_response}
         )
+
+        # Update chat history state
+        st.session_state.chat_history.append(
+            {"role": "model", "parts": [ai_response]}
+        )
+
       except Exception as e:
         error_msg = f"Kono somoshya hoyeche: {e}"
         st.error(error_msg)
