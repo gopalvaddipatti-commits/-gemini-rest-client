@@ -19,22 +19,14 @@ if not groq_api_key:
     st.warning("অ্যাপটি ব্যবহার করতে অনুগ্রহ করে সাইডবারে আপনার Groq API Key দিন।")
     st.stop()
 
-# ডায়নামিক মডেল ডিটেকশন (যাতে আর কখনো 404 এরর না আসে)
+# ফিক্সড এবং নিশ্চিত চ্যাট মডেল (যাতে ক্লাসিফিকেশন মডেলের এরর আর না আসে)
+ACTIVE_MODEL = "llama-3.1-8b-instant"
+
 try:
     client = Groq(api_key=groq_api_key)
-    models_response = client.models.list()
-    
-    # চ্যাট করার উপযুক্ত মডেল খুঁজে বের করা
-    available_models = [m.id for m in models_response.data if any(k in m.id for k in ["llama", "mixtral", "gemma", "gpt"])]
-    if not available_models:
-        available_models = [m.id for m in models_response.data]
-        
-    active_model = available_models[0]
-    st.sidebar.success(connected_msg := f"সক্রিয় মডেল: `{active_model}`")
 except Exception as e:
-    # কোনো কারণে ফেচ করতে না পারলে ডিফল্ট ট্রায়াল মডেল ব্যবহার করবে
-    active_model = "llama-3.1-8b-instant"
-    st.sidebar.warning(f"অটো-ডিটেক্ট ফেইল করেছে, ডিফল্ট মডেল ব্যবহার করা হচ্ছে।")
+    st.error(f"Groq কানেকশন তৈরি করতে সমস্যা হয়েছে: {e}")
+    st.stop()
 
 # চ্যাট হিস্ট্রি ইনিশিয়ালাইজ করা
 if "messages" not in st.session_state:
@@ -67,15 +59,16 @@ if user_input := st.chat_input("এখানে আপনার মেসেজ 
                     "If you still need info (like API key or endpoint), just ask the user conversationally without code."
                 )
 
-                # মেসেজ সিকোয়েন্স ঠিক রাখা (সিস্টেম প্রম্পটের পর ইউজার মেসেজ থাকা বাধ্যতামূলক)
+                # Groq চ্যাট মডেলের জন্য সঠিক মেসেজ লিস্ট তৈরি (সিস্টেম প্রম্পট + ইউজার মেসেজগুলো)
                 api_messages = [{"role": "system", "content": system_prompt}]
                 for msg in st.session_state.messages:
-                    if msg["role"] == "assistant" and len(api_messages) == 1:
+                    # অ্যাসিস্ট্যান্টের প্রথম ওয়েলকাম মেসেজটি এপিআই কলের বাইরে রাখা হলো যাতে সিকোয়েন্স ঠিক থাকে
+                    if msg["role"] == "assistant" and msg["content"].startswith("হ্যালো! আমি আপনার Autonomous"):
                         continue
                     api_messages.append({"role": msg["role"], "content": msg["content"]})
 
                 response = client.chat.completions.create(
-                    model=active_model,
+                    model=ACTIVE_MODEL,
                     messages=api_messages,
                     temperature=0.2,
                 )
