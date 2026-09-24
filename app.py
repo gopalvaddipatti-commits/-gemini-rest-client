@@ -19,7 +19,22 @@ if not groq_api_key:
     st.warning("অ্যাপটি ব্যবহার করতে অনুগ্রহ করে সাইডবারে আপনার Groq API Key দিন।")
     st.stop()
 
-client = Groq(api_key=groq_api_key)
+# ডায়নামিক মডেল ডিটেকশন (যাতে আর কখনো 404 এরর না আসে)
+try:
+    client = Groq(api_key=groq_api_key)
+    models_response = client.models.list()
+    
+    # চ্যাট করার উপযুক্ত মডেল খুঁজে বের করা
+    available_models = [m.id for m in models_response.data if any(k in m.id for k in ["llama", "mixtral", "gemma", "gpt"])]
+    if not available_models:
+        available_models = [m.id for m in models_response.data]
+        
+    active_model = available_models[0]
+    st.sidebar.success(connected_msg := f"সক্রিয় মডেল: `{active_model}`")
+except Exception as e:
+    # কোনো কারণে ফেচ করতে না পারলে ডিফল্ট ট্রায়াল মডেল ব্যবহার করবে
+    active_model = "llama-3.1-8b-instant"
+    st.sidebar.warning(f"অটো-ডিটেক্ট ফেইল করেছে, ডিফল্ট মডেল ব্যবহার করা হচ্ছে।")
 
 # চ্যাট হিস্ট্রি ইনিশিয়ালাইজ করা
 if "messages" not in st.session_state:
@@ -52,15 +67,15 @@ if user_input := st.chat_input("এখানে আপনার মেসেজ 
                     "If you still need info (like API key or endpoint), just ask the user conversationally without code."
                 )
 
-                # এপিআই-এর জন্য মেসেজ সিকোয়েন্স ঠিক করা (প্রথম ওয়েলকাম অ্যাসিস্ট্যান্ট মেসেজ বাদ দেওয়া)
+                # মেসেজ সিকোয়েন্স ঠিক রাখা (সিস্টেম প্রম্পটের পর ইউজার মেসেজ থাকা বাধ্যতামূলক)
                 api_messages = [{"role": "system", "content": system_prompt}]
                 for msg in st.session_state.messages:
                     if msg["role"] == "assistant" and len(api_messages) == 1:
-                        continue  # শুরুর ওয়েলকাম মেসেজটি স্কিপ করা হচ্ছে
+                        continue
                     api_messages.append({"role": msg["role"], "content": msg["content"]})
 
                 response = client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
+                    model=active_model,
                     messages=api_messages,
                     temperature=0.2,
                 )
