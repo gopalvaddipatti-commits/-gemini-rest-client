@@ -19,14 +19,7 @@ if not groq_api_key:
     st.warning("অ্যাপটি ব্যবহার করতে অনুগ্রহ করে সাইডবারে আপনার Groq API Key দিন।")
     st.stop()
 
-# ফিক্সড এবং নিশ্চিত চ্যাট মডেল (যাতে ক্লাসিফিকেশন মডেলের এরর আর না আসে)
-ACTIVE_MODEL = "llama-3.1-8b-instant"
-
-try:
-    client = Groq(api_key=groq_api_key)
-except Exception as e:
-    st.error(f"Groq কানেকশন তৈরি করতে সমস্যা হয়েছে: {e}")
-    st.stop()
+client = Groq(api_key=groq_api_key)
 
 # চ্যাট হিস্ট্রি ইনিশিয়ালাইজ করা
 if "messages" not in st.session_state:
@@ -59,19 +52,32 @@ if user_input := st.chat_input("এখানে আপনার মেসেজ 
                     "If you still need info (like API key or endpoint), just ask the user conversationally without code."
                 )
 
-                # Groq চ্যাট মডেলের জন্য সঠিক মেসেজ লিস্ট তৈরি (সিস্টেম প্রম্পট + ইউজার মেসেজগুলো)
+                # মেসেজ সিকোয়েন্স ঠিক রাখা
                 api_messages = [{"role": "system", "content": system_prompt}]
                 for msg in st.session_state.messages:
-                    # অ্যাসিস্ট্যান্টের প্রথম ওয়েলকাম মেসেজটি এপিআই কলের বাইরে রাখা হলো যাতে সিকোয়েন্স ঠিক থাকে
                     if msg["role"] == "assistant" and msg["content"].startswith("হ্যালো! আমি আপনার Autonomous"):
                         continue
                     api_messages.append({"role": msg["role"], "content": msg["content"]})
 
-                response = client.chat.completions.create(
-                    model=ACTIVE_MODEL,
-                    messages=api_messages,
-                    temperature=0.2,
-                )
+                # ফলব্যাক মেকানিজমসহ মডেল কল (যাতে 404 এরর এড়িয়ে চলা যায়)
+                models_to_try = ["llama-3.3-70b-versatile", "openai/gpt-oss-20b", "llama-3.1-8b-instant"]
+                response = None
+                success = False
+
+                for mdl in models_to_try:
+                    try:
+                        response = client.chat.completions.create(
+                            model=mdl,
+                            messages=api_messages,
+                            temperature=0.2,
+                        )
+                        success = True
+                        break
+                    except Exception:
+                        continue
+                
+                if not success or not response:
+                    raise Exception("কোনো মডেলই রেসপন্স করছে না। দয়া করে আপনার Groq API Key চেক করুন।")
                 
                 ai_reply = response.choices[0].message.content
                 st.markdown(ai_reply)
