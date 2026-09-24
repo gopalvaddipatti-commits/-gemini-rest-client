@@ -1,92 +1,100 @@
 import streamlit as st
 from groq import Groq
-from pymongo import MongoClient
+import requests
+import json
+import io
+import sys
 
-st.set_page_config(page_title="AI API Tester with Database", page_icon="🤖", layout="centered")
-st.title("🤖 AI API Testing Assistant (with MongoDB)")
+st.set_page_config(page_title="Autonomous API Testing Agent", page_icon="🤖", layout="centered")
+st.title("🤖 Autonomous REST API Testing Agent")
 
-# ১. MongoDB কানেকশন সেটআপ (Streamlit Secrets অথবা সাইডবার থেকে)
-mongo_uri = ""
-try:
-    mongo_uri = st.secrets["MONGO_URI"]
-except:
-    mongo_uri = st.sidebar.text_input("MongoDB URI দিন:", type="password")
-
-# ২. Groq API Key সেটআপ
+# Groq API Key সেটআপ
 groq_api_key = ""
 try:
     groq_api_key = st.secrets["GROQ_API_KEY"]
 except:
     groq_api_key = st.sidebar.text_input("Groq API Key দিন:", type="password")
 
-if not mongo_uri or not groq_api_key:
-    st.warning("চালু করার জন্য দয়া করে সাইডবারে আপনার MongoDB URI এবং Groq API Key দিন।")
+if not groq_api_key:
+    st.warning("অ্যাপটি ব্যবহার করতে অনুগ্রহ করে সাইডবারে আপনার Groq API Key দিন।")
     st.stop()
 
-try:
-    client_db = MongoClient(mongo_uri)
-    db = client_db["ai_api_tester"]
-    chats_collection = db["chat_history"]
-except Exception as e:
-    st.error(f"ডাটাবেস কানেকশনে সমস্যা হয়েছে: {e}")
-    st.stop()
+client = Groq(api_key=groq_api_key)
 
-client_groq = Groq(api_key=groq_api_key)
-
-# ৩. ডাটাবেস থেকে আগের চ্যাট হিস্ট্রি লোড করা
+# চ্যাট হিস্ট্রি ইনিশিয়ালাইজ করা
 if "messages" not in st.session_state:
-    st.session_state.messages = []
-    # ডাটাবেস থেকে আগের চ্যাটগুলো ফেচ করা
-    saved_chats = chats_collection.find().sort("_id", 1)
-    for chat in saved_chats:
-        st.session_state.messages.append({"role": chat["role"], "content": chat["content"]})
-    
-    # যদি একদম নতুন হয়, তবে ওয়েলকাম মেসেজ দেওয়া
-    if not st.session_state.messages:
-        initial_msg = "হ্যালো! আপনি কোন ওয়েবসাইটের বা সার্ভিসের REST API টেস্ট করতে চান? শুধু সেটির নাম দিন।"
-        st.session_state.messages.append({"role": "assistant", "content": initial_msg})
-        chats_collection.insert_one({"role": "assistant", "content": initial_msg})
+    st.session_state.messages = [
+        {"role": "assistant", "content": "হ্যালো! আমি আপনার Autonomous API Tester। আপনি কোন সার্ভিসের API টেস্ট করতে চান? (যেমন: GitHub, JSONPlaceholder ইত্যাদি এবং আপনার ক্রেডেনশিয়াল বা টোকেন দিন)"}
+    ]
 
-# ৪. চ্যাট মেসেজগুলো স্ক্রিনে দেখানো
+# চ্যাট হিস্ট্রি স্ক্রিনে দেখানো
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# ৫. ইউজারের ইনপুট নেওয়া এবং সেভ করা
+# ইউজার ইনপুট
 if user_input := st.chat_input("এখানে আপনার মেসেজ লিখুন..."):
     st.session_state.messages.append({"role": "user", "content": user_input})
-    chats_collection.insert_one({"role": "user", "content": user_input}) # MongoDB তে সেভ
-    
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # ৬. AI রেসপন্স জেনারেট করা
+    # AI রেসপন্স এবং API এক্সিকিউশন
     with st.chat_message("assistant"):
-        with st.spinner("ভেবে দেখছি... মডেল কাজ করছে..."):
+        with st.spinner("AI চ্যাট প্রসেস করছে এবং API টেস্ট কোড তৈরি করছে..."):
             try:
-                response = client_groq.chat.completions.create(
-                    model="openai/gpt-oss-20b",
-                    messages=[
-                        {
-                            "role": "system", 
-                            "content": (
-                                "You are a helpful AI API Testing Assistant. "
-                                "Your job is to converse with the user step-by-step. "
-                                "First, ask for the service name. Once they give it, "
-                                "analyze what credentials (Client ID, Secret, API Key) or endpoint details are needed, "
-                                "and ask the user for them conversationally. Guide them like an interactive assistant."
-                            )
-                        }
-                    ] + [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages],
-                    temperature=0.3,
+                # প্রম্পট যাতে AI শুধু কথা না বলে, প্রয়োজনে পাইথন কোড লিখে API টেস্ট করতে পারে
+                system_prompt = (
+                    "You are an expert Autonomous API Testing Agent. "
+                    "Converse with the user step-by-step to get the service name and required credentials/headers. "
+                    "Once you have enough information to test the API, write a clean, executable Python script "
+                    "using the 'requests' library to make the API call. "
+                    "You MUST wrap the Python executable code inside a standard markdown code block using ```python and ```. "
+                    "Inside the code, print the HTTP Status Code and the response text/JSON clearly using print statements. "
+                    "If you still need info (like API key or endpoint), just ask the user conversationally without code."
+                )
+
+                response = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[{"role": "system", "content": system_prompt}] + st.session_state.messages,
+                    temperature=0.2,
                 )
                 
                 ai_reply = response.choices[0].message.content
                 st.markdown(ai_reply)
                 
-                # AI এর রিপ্লাই স্ক্রিনে দেখানো এবং MongoDB তে সেভ করা
+                # চেক করা যে AI কোড জেনারেট করেছে কিনা API টেস্ট করার জন্য
+                if "```python" in ai_reply:
+                    # কোড এক্সট্রাক্ট করা
+                    try:
+                        code_start = ai_reply.find("```python") + 9
+                        code_end = ai_reply.find("```", code_start)
+                        python_code = ai_reply[code_start:code_end].strip()
+                        
+                        st.info("🔄 ব্যাকগ্রাউন্ডে লাইভ API রিকোয়েস্ট পাঠানো হচ্ছে...")
+                        
+                        # পাইথন কোড সেফলি রান করা এবং আউটপুট ক্যাপচার করা
+                        old_stdout = sys.stdout
+                        new_stdout = io.StringIO()
+                        sys.stdout = new_stdout
+                        
+                        # কোড এক্সিকিউশন
+                        exec(python_code, {"requests": requests, "json": json})
+                        
+                        sys.stdout = old_stdout
+                        execution_output = new_stdout.getvalue()
+                        
+                        # রেজাল্ট চ্যাটে দেখানো
+                        st.markdown("### 📊 API Execution Result:")
+                        st.code(execution_output, language="text")
+                        
+                        # হিস্ট্রিতে রেজাল্ট যুক্ত করা
+                        ai_reply += f"\n\n### Execution Output:\n```text\n{execution_output}\n```"
+                        
+                    except Exception as exec_err:
+                        sys.stdout = sys.stdout if 'old_stdout' not in locals() else old_stdout
+                        st.error(f"API কোড রান করার সময় এরর হয়েছে: {exec_err}")
+                
                 st.session_state.messages.append({"role": "assistant", "content": ai_reply})
-                chats_collection.insert_one({"role": "assistant", "content": ai_reply})
                 
             except Exception as e:
                 st.error(f"এরর হয়েছে: {e}")
