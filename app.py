@@ -24,7 +24,7 @@ client = Groq(api_key=groq_api_key)
 # চ্যাট হিস্ট্রি ইনিশিয়ালাইজ করা
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "হ্যালো! আমি আপনার Autonomous API Tester। আপনি কোন সার্ভিসের API টেস্ট করতে চান? (যেমন: GitHub, JSONPlaceholder ইত্যাদি এবং আপনার ক্রেডেনশিয়াল বা টোকেন দিন)"}
+        {"role": "assistant", "content": "হ্যালো! আমি আপনার Autonomous API Tester। আপনি কোন সার্ভিসের API টেস্ট করতে চান? (যেমন: GitHub ইত্যাদি এবং আপনার ক্রেডেনশিয়াল বা টোকেন দিন)"}
     ]
 
 # চ্যাট হিস্ট্রি স্ক্রিনে দেখানো
@@ -42,7 +42,6 @@ if user_input := st.chat_input("এখানে আপনার মেসেজ 
     with st.chat_message("assistant"):
         with st.spinner("AI চ্যাট প্রসেস করছে এবং API টেস্ট কোড তৈরি করছে..."):
             try:
-                # প্রম্পট যাতে AI শুধু কথা না বলে, প্রয়োজনে পাইথন কোড লিখে API টেস্ট করতে পারে
                 system_prompt = (
                     "You are an expert Autonomous API Testing Agent. "
                     "Converse with the user step-by-step to get the service name and required credentials/headers. "
@@ -54,7 +53,7 @@ if user_input := st.chat_input("এখানে আপনার মেসেজ 
                 )
 
                 response = client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
+                    model="llama-3.3-70b-versatile",
                     messages=[{"role": "system", "content": system_prompt}] + st.session_state.messages,
                     temperature=0.2,
                 )
@@ -64,7 +63,6 @@ if user_input := st.chat_input("এখানে আপনার মেসেজ 
                 
                 # চেক করা যে AI কোড জেনারেট করেছে কিনা API টেস্ট করার জন্য
                 if "```python" in ai_reply:
-                    # কোড এক্সট্রাক্ট করা
                     try:
                         code_start = ai_reply.find("```python") + 9
                         code_end = ai_reply.find("```", code_start)
@@ -77,7 +75,6 @@ if user_input := st.chat_input("এখানে আপনার মেসেজ 
                         new_stdout = io.StringIO()
                         sys.stdout = new_stdout
                         
-                        # কোড এক্সিকিউশন
                         exec(python_code, {"requests": requests, "json": json})
                         
                         sys.stdout = old_stdout
@@ -87,7 +84,6 @@ if user_input := st.chat_input("এখানে আপনার মেসেজ 
                         st.markdown("### 📊 API Execution Result:")
                         st.code(execution_output, language="text")
                         
-                        # হিস্ট্রিতে রেজাল্ট যুক্ত করা
                         ai_reply += f"\n\n### Execution Output:\n```text\n{execution_output}\n```"
                         
                     except Exception as exec_err:
