@@ -252,13 +252,22 @@ st.title("🔌 API Chat (any AI)")
 
 with st.sidebar:
     st.subheader("1. AI provider")
-    pname = st.selectbox("Provider", list(PROVIDERS.keys()))
+    pname = st.selectbox(
+        "Provider", list(PROVIDERS.keys()),
+        index=list(PROVIDERS.keys()).index("Gemini (Google)"),
+    )
     provider = PROVIDERS[pname]
     base_url = provider["base_url"]
     if pname.startswith("Custom"):
         base_url = st.text_input("Base URL", placeholder="https://.../v1")
-    model = st.text_input("Model name", help="Provider এর docs/console থেকে দেখে বসান")
-    ai_key = st.text_input("AI API key", type="password")
+    model = st.text_input(
+        "Model name",
+        value="gemini-flash-latest" if pname.startswith("Gemini") else "",
+        key=f"model_{pname}",
+        help="Provider এর docs/console থেকে দেখে বসান",
+    ).strip()
+    ai_key = st.text_input("AI API key", type="password", key=f"aikey_{pname}").strip()
+    st.caption(f"এখন বাছা provider: {pname}")
 
     if st.button("Test this AI key"):
         if not ai_key or not model:
