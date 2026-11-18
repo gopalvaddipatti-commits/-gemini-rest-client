@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from urllib.parse import urljoin, urlparse
@@ -9,7 +10,7 @@ import yaml
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
-st.set_page_config(page_title="API Chat (any AI)", page_icon="🔌")
+st.set_page_config(page_title="API Chat Assistant", page_icon="💬")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (DocAutoClient)"}
 
@@ -27,29 +28,89 @@ PROVIDERS = {
         "type": "openai",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
     },
+    "Groq": {"type": "openai", "base_url": "https://api.groq.com/openai/v1"},
+    "OpenRouter": {"type": "openai", "base_url": "https://openrouter.ai/api/v1"},
     "Custom (OpenAI-compatible)": {"type": "openai", "base_url": ""},
 }
 
-TOOL_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "method": {"type": "string", "description": "GET, POST, PUT, PATCH or DELETE"},
-        "path": {"type": "string", "description": "Endpoint path, e.g. /users/{id}"},
-        "params": {"type": "object", "description": "Query or path parameters"},
-        "body": {"type": "object", "description": "JSON body for POST/PUT/PATCH"},
+# ---------------------------------------------------------------- tool definitions
+TOOL_DEFS = [
+    {
+        "name": "read_url",
+        "description": (
+            "Download a web page (for example API documentation) and return its text, "
+            "OpenAPI/Swagger links found on it, and the page's links so you can follow "
+            "them. Call it again with other URLs from the page to read deeper."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+        },
     },
-    "required": ["method", "path"],
-}
-TOOL_DESC = "Send a real HTTP request to the connected target API. Pick the endpoint from the list in the system prompt."
+    {
+        "name": "load_openapi",
+        "description": (
+            "Try to find and load an OpenAPI/Swagger spec for a documentation URL. "
+            "Returns base_url, auth info and the endpoint list, or found=false."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "set_credential",
+        "description": (
+            "Store a secret the user typed in chat (API key, token, account id) under a "
+            "short name. For HTTP Basic auth store 'username:password'. "
+            "Never repeat the secret in your replies."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "value": {"type": "string"}},
+            "required": ["name", "value"],
+        },
+    },
+    {
+        "name": "call_api",
+        "description": (
+            "Send a real HTTP request to an API. url can be a full URL or a path (then "
+            "the loaded base_url is used). Some APIs (for example Twilio) expect "
+            "form-encoded bodies: set body_format to 'form'. auth.credential is the NAME "
+            "of a stored credential; auth.type is none, bearer, basic, header or query; "
+            "auth.name is the header or query parameter name when needed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "method": {"type": "string"},
+                "url": {"type": "string"},
+                "params": {"type": "object"},
+                "body": {"type": "object"},
+                "body_format": {"type": "string", "enum": ["json", "form"]},
+                "auth": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string"},
+                        "credential": {"type": "string"},
+                        "name": {"type": "string"},
+                    },
+                },
+            },
+            "required": ["method", "url"],
+        },
+    },
+]
+ANTHROPIC_TOOLS = [
+    {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
+    for t in TOOL_DEFS
+]
+OPENAI_TOOLS = [{"type": "function", "function": t} for t in TOOL_DEFS]
 
-ANTHROPIC_TOOLS = [{"name": "call_api", "description": TOOL_DESC, "input_schema": TOOL_SCHEMA}]
-OPENAI_TOOLS = [{
-    "type": "function",
-    "function": {"name": "call_api", "description": TOOL_DESC, "parameters": TOOL_SCHEMA},
-}]
 
-
-# ---------------------------------------------------------------- docs -> config
+# ---------------------------------------------------------------- OpenAPI helpers
 def try_load_spec(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
@@ -70,11 +131,9 @@ def try_load_spec(url):
 
 
 def find_openapi(doc_url):
-    # 1) the url itself may be the spec
     spec = try_load_spec(doc_url)
     if spec:
         return spec
-    # 2) links on the page
     try:
         html = requests.get(doc_url, headers=HEADERS, timeout=15).text
         soup = BeautifulSoup(html, "html.parser")
@@ -86,7 +145,6 @@ def find_openapi(doc_url):
                     return spec
     except Exception:
         pass
-    # 3) common paths
     parsed = urlparse(doc_url)
     base = f"{parsed.scheme}://{parsed.netloc}"
     for path in COMMON_SPEC_PATHS:
@@ -106,13 +164,16 @@ def spec_to_config(spec, doc_url):
     if base_url and not base_url.startswith("http"):
         base_url = urljoin(doc_url, base_url)
 
-    auth = {"type": "bearer", "header": "Authorization"}
+    auth = {"type": "bearer", "name": "Authorization"}
     schemes = (spec.get("components", {}).get("securitySchemes")
                or spec.get("securityDefinitions") or {})
     for s in schemes.values():
         if s.get("type") == "apiKey":
             where = "query" if s.get("in") == "query" else "header"
-            auth = {"type": where, "header": s.get("name", "X-API-Key")}
+            auth = {"type": where, "name": s.get("name", "X-API-Key")}
+            break
+        if s.get("type") == "http" and s.get("scheme") == "basic":
+            auth = {"type": "basic"}
             break
 
     endpoints = []
@@ -127,62 +188,160 @@ def spec_to_config(spec, doc_url):
             params = [p.get("name") for p in info.get("parameters", [])
                       if isinstance(p, dict) and p.get("name")]
             endpoints.append({
-                "method": method.upper(),
-                "path": path,
-                "summary": info.get("summary", ""),
-                "params": params,
+                "method": method.upper(), "path": path,
+                "summary": info.get("summary", ""), "params": params,
             })
     return {"base_url": base_url, "auth": auth, "endpoints": endpoints}
 
 
-# ---------------------------------------------------------------- target API call
-def send_request(config, api_key, method, path, params, body):
-    url = config["base_url"].rstrip("/") + path
-    headers = {}
-    query = dict(params or {})
-    auth = config.get("auth", {})
-    if api_key:
-        if auth.get("type") == "header":
-            headers[auth.get("header", "X-API-Key")] = api_key
-        elif auth.get("type") == "query":
-            query[auth.get("header", "api_key")] = api_key
-        else:
-            headers["Authorization"] = f"Bearer {api_key}"
-    return requests.request(
-        method.upper(), url, headers=headers, params=query,
-        json=body if body else None, timeout=30,
-    )
+# ---------------------------------------------------------------- tool implementations
+def tool_read_url(url):
+    r = requests.get(url, headers=HEADERS, timeout=20)
+    soup = BeautifulSoup(r.text, "html.parser")
+    spec_links, links = [], []
+    host = urlparse(url).netloc
+    for tag in soup.find_all(["a", "link", "script"]):
+        ref = tag.get("href") or tag.get("src") or ""
+        if not ref or ref.startswith("#"):
+            continue
+        full = urljoin(url, ref)
+        if re.search(r"(openapi|swagger).*\.(json|ya?ml)$", ref, re.I):
+            spec_links.append(full)
+        elif tag.name == "a" and urlparse(full).netloc == host and len(links) < 60:
+            label = tag.get_text(" ", strip=True)[:60]
+            if label:
+                links.append(f"{label} -> {full}")
+    for t in soup(["script", "style"]):
+        t.decompose()
+    text = re.sub(r"\n\s*\n+", "\n", soup.get_text("\n"))
+    return {
+        "status": r.status_code,
+        "text": text[:15000],
+        "openapi_links": spec_links[:10],
+        "page_links": links,
+    }
 
 
-def run_tool(config, api_key, tool_input):
-    path = tool_input["path"]
-    params = dict(tool_input.get("params") or {})
+def tool_load_openapi(url):
+    spec = find_openapi(url)
+    if not spec:
+        return {"found": False}
+    cfg = spec_to_config(spec, url)
+    st.session_state.config = cfg
+    return {
+        "found": True, "base_url": cfg["base_url"], "auth": cfg["auth"],
+        "total_endpoints": len(cfg["endpoints"]), "endpoints": cfg["endpoints"][:150],
+    }
+
+
+def tool_set_credential(name, value):
+    st.session_state.credentials[name] = value.strip()
+    return {"saved": name}
+
+
+def needs_confirmation(args):
+    """Code-level safety: a write call only runs after the user replied in a later chat turn."""
+    if args["method"].upper() in ("GET", "HEAD", "OPTIONS"):
+        return False
+    sig = hashlib.sha256(json.dumps(args, sort_keys=True, default=str).encode()).hexdigest()
+    turn = len([m for m in st.session_state.history if m["role"] == "user"])
+    pending = st.session_state.get("pending")
+    if pending and pending["sig"] == sig and turn > pending["turn"]:
+        st.session_state.pending = None
+        return False
+    st.session_state.pending = {"sig": sig, "turn": turn}
+    return True
+
+
+def tool_call_api(args):
+    method = args["method"].upper()
+    url = args["url"]
+    params = dict(args.get("params") or {})
+    if not url.startswith("http"):
+        base = (st.session_state.get("config") or {}).get("base_url", "")
+        url = base.rstrip("/") + "/" + url.lstrip("/")
     for k in list(params.keys()):
-        if "{" + k + "}" in path:
-            path = path.replace("{" + k + "}", str(params.pop(k)))
+        if "{" + k + "}" in url:
+            url = url.replace("{" + k + "}", str(params.pop(k)))
+
+    if needs_confirmation(args):
+        return {
+            "status": "NOT_SENT",
+            "message": (
+                "Not sent yet. Show the user exactly what will be sent (method, url, "
+                "params, body) in simple words and ask them to reply yes in chat. After "
+                "they reply, call call_api again with exactly the same arguments."
+            ),
+        }
+
+    headers, basic = {}, None
+    auth = args.get("auth") or {}
+    atype = auth.get("type", "none")
+    if atype != "none":
+        cred = st.session_state.credentials.get(auth.get("credential", ""))
+        if cred is None:
+            return {"error": "credential not stored. Ask the user for it."}
+        if atype == "bearer":
+            headers["Authorization"] = f"Bearer {cred}"
+        elif atype == "header":
+            headers[auth.get("name", "X-API-Key")] = cred
+        elif atype == "query":
+            params[auth.get("name", "api_key")] = cred
+        elif atype == "basic":
+            user, _, pw = cred.partition(":")
+            basic = (user, pw)
+
+    kwargs = {"headers": headers, "params": params, "auth": basic, "timeout": 30}
+    body = args.get("body")
+    if body:
+        if args.get("body_format") == "form":
+            kwargs["data"] = body
+        else:
+            kwargs["json"] = body
+    resp = requests.request(method, url, **kwargs)
     try:
-        resp = send_request(config, api_key, tool_input["method"], path,
-                            params, tool_input.get("body"))
-        try:
-            data = resp.json()
-        except Exception:
-            data = resp.text
-        out = {"status": resp.status_code, "data": data}
+        data = resp.json()
+    except Exception:
+        data = resp.text
+    return {"status": resp.status_code, "body": data}
+
+
+def dispatch(name, args):
+    try:
+        if name == "read_url":
+            out = tool_read_url(args["url"])
+        elif name == "load_openapi":
+            out = tool_load_openapi(args["url"])
+        elif name == "set_credential":
+            out = tool_set_credential(args["name"], args["value"])
+        elif name == "call_api":
+            out = tool_call_api(args)
+        else:
+            out = {"error": f"unknown tool {name}"}
     except Exception as e:
         out = {"error": str(e)}
-    return json.dumps(out, ensure_ascii=False)[:20000]
+    return json.dumps(out, ensure_ascii=False, default=str)[:20000]
+
+
+def show_tool(name, args):
+    if name == "set_credential":
+        label, shown = "🔐 saving a secret", {"name": args.get("name"), "value": "••••••"}
+    elif name in ("read_url", "load_openapi"):
+        label, shown = f"🔎 {name}: {args.get('url')}", args
+    else:
+        label, shown = f"📡 {args.get('method')} {args.get('url')}", args
+    with st.expander(label):
+        st.json(shown)
 
 
 # ---------------------------------------------------------------- AI layer
-def ask_ai(provider, ai_key, model, base_url, system, history, config=None, api_key=""):
-    """history = list of {role, content(str)}. Returns final text."""
-    config = config or {}
+def ask_ai(provider, ai_key, model, base_url, system, history, use_tools=True):
     if provider["type"] == "anthropic":
         client = anthropic.Anthropic(api_key=ai_key)
         msgs = list(history)
-        for _ in range(6):
-            kwargs = dict(model=model, max_tokens=2000, system=system, messages=msgs)
-            if config:
+        for _ in range(10):
+            kwargs = dict(model=model, max_tokens=2500, system=system, messages=msgs)
+            if use_tools:
                 kwargs["tools"] = ANTHROPIC_TOOLS
             r = client.messages.create(**kwargs)
             blocks = []
@@ -198,19 +357,17 @@ def ask_ai(provider, ai_key, model, base_url, system, history, config=None, api_
             results = []
             for b in r.content:
                 if b.type == "tool_use":
-                    with st.expander(f"API call: {b.input.get('method')} {b.input.get('path')}"):
-                        st.json(b.input)
+                    show_tool(b.name, b.input)
                     results.append({"type": "tool_result", "tool_use_id": b.id,
-                                    "content": run_tool(config, api_key, b.input)})
+                                    "content": dispatch(b.name, b.input)})
             msgs.append({"role": "user", "content": results})
-        return "(too many tool calls)"
+        return "(too many steps)"
 
-    # OpenAI-compatible: OpenAI, Grok, DeepSeek, Gemini, custom
     client = OpenAI(api_key=ai_key, base_url=base_url or None)
     msgs = [{"role": "system", "content": system}] + list(history)
-    for _ in range(6):
+    for _ in range(10):
         kwargs = dict(model=model, messages=msgs)
-        if config:
+        if use_tools:
             kwargs["tools"] = OPENAI_TOOLS
         r = client.chat.completions.create(**kwargs)
         m = r.choices[0].message
@@ -226,36 +383,49 @@ def ask_ai(provider, ai_key, model, base_url, system, history, config=None, api_
         })
         for tc in m.tool_calls:
             args = json.loads(tc.function.arguments or "{}")
-            with st.expander(f"API call: {args.get('method')} {args.get('path')}"):
-                st.json(args)
+            show_tool(tc.function.name, args)
             msgs.append({"role": "tool", "tool_call_id": tc.id,
-                         "content": run_tool(config, api_key, args)})
-    return "(too many tool calls)"
+                         "content": dispatch(tc.function.name, args)})
+    return "(too many steps)"
 
 
-def extract_with_ai(provider, ai_key, model, base_url, doc_url):
-    html = requests.get(doc_url, headers=HEADERS, timeout=20).text
-    text = BeautifulSoup(html, "html.parser").get_text("\n")[:60000]
-    prompt = (
-        "Below is API documentation text. Return ONLY valid JSON, no explanation, in this shape: "
-        '{"base_url": str, "auth": {"type": "bearer|header|query", "header": str}, '
-        '"endpoints": [{"method": str, "path": str, "summary": str, "params": [str]}]}\n\n'
-        + text
+def build_system():
+    s = (
+        "You are a friendly assistant. You talk with the user in a normal chat (reply in "
+        "the language the user writes in, Bengali if they write Bengali) and you set up "
+        "and run REST API calls for them using your tools. A typical request: the user "
+        "pastes an API documentation link (for example a phone / telephony provider) and "
+        "wants to make an outbound phone call automatically through REST. "
+        "How to work: 1) read_url the documentation link. 2) Try load_openapi, and follow "
+        "the relevant doc links with read_url until you find the exact endpoint for what "
+        "the user wants, its required parameters, the auth style and the body format. "
+        "3) Explain in very simple words what is needed (account, API key or token, from "
+        "number, to number, ...) and ask only for what is still missing. 4) When the user "
+        "gives secrets, store them with set_credential and never repeat them. "
+        "5) Use call_api to do it. Never invent endpoints or parameters: only use what you "
+        "actually read. Outbound calls cost money and contact real people, so before any "
+        "POST, PUT, PATCH or DELETE show exactly what will be sent and wait for the user's "
+        "yes. Keep answers short and simple."
     )
-    raw = ask_ai(provider, ai_key, model, base_url, "Return JSON only.",
-                 [{"role": "user", "content": prompt}])
-    return json.loads(raw[raw.find("{"): raw.rfind("}") + 1])
+    creds = list(st.session_state.credentials.keys())
+    s += f"\nStored credential names: {creds if creds else 'none'}."
+    cfg = st.session_state.get("config")
+    if cfg:
+        s += "\nCurrently loaded API: " + json.dumps(cfg, ensure_ascii=False)[:12000]
+    return s
 
 
 # ---------------------------------------------------------------- UI
-st.title("🔌 API Chat (any AI)")
+st.session_state.setdefault("history", [])
+st.session_state.setdefault("credentials", {})
+
+st.title("💬 API Chat Assistant")
+st.caption("আমার সাথে সাধারণ চ্যাটের মতো কথা বলুন। API documentation এর লিংক চ্যাটেই দিন, বাকিটা আমি পিছনে দেখে নেব।")
 
 with st.sidebar:
-    st.subheader("1. AI provider")
-    pname = st.selectbox(
-        "Provider", list(PROVIDERS.keys()),
-        index=list(PROVIDERS.keys()).index("Gemini (Google)"),
-    )
+    st.subheader("AI সেটিংস")
+    names = list(PROVIDERS.keys())
+    pname = st.selectbox("Provider", names, index=names.index("Gemini (Google)"))
     provider = PROVIDERS[pname]
     base_url = provider["base_url"]
     if pname.startswith("Custom"):
@@ -264,7 +434,6 @@ with st.sidebar:
         "Model name",
         value="gemini-flash-latest" if pname.startswith("Gemini") else "",
         key=f"model_{pname}",
-        help="Provider এর docs/console থেকে দেখে বসান",
     ).strip()
     ai_key = st.text_input("AI API key", type="password", key=f"aikey_{pname}").strip()
     st.caption(f"এখন বাছা provider: {pname}")
@@ -275,66 +444,50 @@ with st.sidebar:
         else:
             try:
                 reply = ask_ai(provider, ai_key, model, base_url, "Reply with one word.",
-                               [{"role": "user", "content": "Say hi"}])
+                               [{"role": "user", "content": "Say hi"}], use_tools=False)
                 st.success(f"Key works: {reply[:80]}")
             except Exception as e:
                 st.error(f"Failed: {e}")
 
-    st.subheader("2. Target API")
-    doc_url = st.text_input("Documentation URL")
-    target_key = st.text_input("Target API key", type="password")
+    with st.expander("🔑 Secret key দেওয়ার নিরাপদ জায়গা (ঐচ্ছিক)"):
+        st.caption("চ্যাটে key লিখলে সেটা AI কোম্পানির কাছেও যায়। এখানে দিলে যায় না।")
+        c_name = st.text_input("নাম (যেমন twilio)")
+        c_val = st.text_input("Key বা token", type="password")
+        if st.button("Save secret") and c_name and c_val:
+            st.session_state.credentials[c_name.strip()] = c_val.strip()
+            st.success("সেভ হয়েছে")
+        if st.session_state.credentials:
+            st.write("Saved:", ", ".join(st.session_state.credentials.keys()))
 
-    if st.button("Connect") and doc_url:
-        try:
-            with st.spinner("OpenAPI খুঁজছি..."):
-                spec = find_openapi(doc_url)
-            if spec:
-                st.session_state.config = spec_to_config(spec, doc_url)
-                st.success("OpenAPI spec পাওয়া গেছে")
-            else:
-                if not ai_key or not model:
-                    st.error("Spec পাওয়া যায়নি। Docs পড়ার জন্য AI key আর model name দিন।")
-                    st.stop()
-                with st.spinner("AI docs পড়ছে..."):
-                    st.session_state.config = extract_with_ai(
-                        provider, ai_key, model, base_url, doc_url)
-                st.success("AI দিয়ে docs পড়া হয়েছে")
-            st.session_state.history = []
-        except Exception as e:
-            st.error(f"Connect failed: {e}")
+    if st.button("নতুন চ্যাট শুরু করুন"):
+        st.session_state.history = []
+        st.session_state.pop("config", None)
+        st.session_state.pop("pending", None)
+        st.rerun()
 
-config = st.session_state.get("config")
-if not config:
-    st.info("Sidebar এ AI provider আর documentation link দিয়ে Connect চাপুন।")
-    st.stop()
-
-with st.expander(f"Connected: {config.get('base_url', '')} ({len(config.get('endpoints', []))} endpoints)"):
-    st.json(config)
-
-st.session_state.setdefault("history", [])
-
-SYSTEM = (
-    "You are an API assistant. Call the target API for the user with the call_api tool. "
-    "Base URL: " + config.get("base_url", "") + "\nEndpoints:\n"
-    + json.dumps(config.get("endpoints", []), ensure_ascii=False)[:30000]
-    + "\nReply in the user's language and explain results simply. "
-    "Ask the user to confirm before any POST, PUT, PATCH or DELETE."
-)
+if not st.session_state.history:
+    st.info(
+        "যেমন লিখতে পারেন: \"এই documentation পড়ে বলো কীভাবে REST দিয়ে outbound phone call করা যায়: "
+        "https://...\""
+    )
 
 for m in st.session_state.history:
     with st.chat_message(m["role"]):
         st.write(m["content"])
 
-user_text = st.chat_input("কী API কল করতে চান, লিখুন...")
+user_text = st.chat_input("এখানে লিখুন...")
 if user_text:
+    if not ai_key or not model:
+        st.warning("আগে সাইডবারে Model name আর AI API key দিন।")
+        st.stop()
     st.session_state.history.append({"role": "user", "content": user_text})
     with st.chat_message("user"):
         st.write(user_text)
     with st.chat_message("assistant"):
         with st.spinner("..."):
             try:
-                final = ask_ai(provider, ai_key, model, base_url, SYSTEM,
-                               st.session_state.history, config, target_key)
+                final = ask_ai(provider, ai_key, model, base_url, build_system(),
+                               st.session_state.history)
             except Exception as e:
                 final = f"Error: {e}"
         st.write(final)
