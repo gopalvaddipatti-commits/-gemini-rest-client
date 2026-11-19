@@ -1,7 +1,8 @@
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import json
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import anthropic
 import requests
@@ -35,6 +36,20 @@ PROVIDERS = {
 
 # ---------------------------------------------------------------- tool definitions
 TOOL_DEFS = [
+    {
+        "name": "search_docs",
+        "description": (
+            "Search the web to find the official API documentation page of a website or "
+            "service when the user gave only its name. Returns a list of {title, url}. "
+            "Try queries like '<name> API documentation' or '<name> REST API reference'. "
+            "Prefer the official domain of the service over blogs or third-party sites."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    },
     {
         "name": "read_url",
         "description": (
@@ -81,7 +96,9 @@ TOOL_DEFS = [
             "form-encoded bodies: set body_format to 'form'. auth.credential is the NAME "
             "of a stored credential; auth.type is none, bearer, basic (credential stored "
             "as 'user:password'), header or query; auth.name is the header or query "
-            "parameter name when needed. Anywhere in url, headers, params or body you may "
+            "parameter name when needed. params, body and headers must be JSON objects written "
+            "as strings, for example '{\"To\": \"+15551234567\"}'. Anywhere in url, headers, "
+            "params or body you may "
             "write {{cred:NAME}} and the app inserts the stored secret itself. To keep a "
             "value from the response (for example an OAuth access_token) as a new stored "
             "credential without seeing it, set save_as."
@@ -91,10 +108,10 @@ TOOL_DEFS = [
             "properties": {
                 "method": {"type": "string"},
                 "url": {"type": "string"},
-                "params": {"type": "object"},
-                "body": {"type": "object"},
+                "params": {"type": "string"},
+                "body": {"type": "string"},
                 "body_format": {"type": "string", "enum": ["json", "form"]},
-                "headers": {"type": "object"},
+                "headers": {"type": "string"},
                 "save_as": {
                     "type": "object",
                     "properties": {
@@ -271,6 +288,84 @@ def tool_read_url(url):
     }
 
 
+def ddg_search(query, n=8):
+    r = requests.post("https://html.duckduckgo.com/html/", data={"q": query},
+                      headers=HEADERS, timeout=10)
+    soup = BeautifulSoup(r.text, "html.parser")
+    results = []
+    for a in soup.select("a.result__a"):
+        href = a.get("href", "")
+        m = re.search(r"uddg=([^&]+)", href)
+        if m:
+            href = unquote(m.group(1))
+        if href.startswith("//"):
+            href = "https:" + href
+        if href.startswith("http"):
+            results.append({"title": a.get_text(" ", strip=True)[:100], "url": href})
+        if len(results) >= n:
+            break
+    return results
+
+
+def bing_search(query, n=8):
+    r = requests.get("https://www.bing.com/search", params={"q": query},
+                     headers=HEADERS, timeout=10)
+    soup = BeautifulSoup(r.text, "html.parser")
+    results = []
+    for a in soup.select("li.b_algo h2 a"):
+        href = a.get("href", "")
+        if href.startswith("http"):
+            results.append({"title": a.get_text(" ", strip=True)[:100], "url": href})
+        if len(results) >= n:
+            break
+    return results
+
+
+def _probe(u):
+    try:
+        r = requests.get(u, headers=HEADERS, timeout=4, allow_redirects=True)
+        return r.url if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def guess_doc_urls(query):
+    """Last fallback: probe common documentation addresses in parallel."""
+    words = re.sub(r"(?i)\b(api|docs?|documentation|rest|reference|developer)\b", " ", query)
+    slug = re.sub(r"[^a-z0-9]", "", words.lower())
+    if not slug:
+        return []
+    candidates = [
+        f"https://docs.{slug}.com", f"https://developers.{slug}.com",
+        f"https://developer.{slug}.com", f"https://www.{slug}.com/docs",
+        f"https://{slug}.com/docs", f"https://api.{slug}.com",
+        f"https://{slug}.com/developers", f"https://{slug}.dev/docs",
+    ]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        hits = [h for h in ex.map(_probe, candidates) if h]
+    return [{"title": "guessed address", "url": h} for h in hits]
+
+
+def tool_search_docs(query):
+    results = []
+    for fn in (ddg_search, bing_search):
+        try:
+            results = fn(query)
+        except Exception:
+            results = []
+        if results:
+            break
+    if not results:
+        results = guess_doc_urls(query)
+    if not results:
+        return {
+            "found": False,
+            "message": "No results. Do not search again more than once; "
+                       "ask the user for the documentation link.",
+        }
+    return {"found": True, "results": results}
+
+
 def tool_load_openapi(url):
     spec = find_openapi(url)
     if not spec:
@@ -300,6 +395,19 @@ def needs_confirmation(args):
         return False
     st.session_state.pending = {"sig": sig, "turn": turn}
     return True
+
+
+def as_obj(v):
+    """params/body/headers arrive as JSON strings (or dicts); always return a dict."""
+    if isinstance(v, dict):
+        return dict(v)
+    if isinstance(v, str) and v.strip():
+        try:
+            parsed = json.loads(v)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
 
 
 def get_field(data, path):
@@ -359,9 +467,9 @@ def tool_call_api(args):
         }
 
     url = subst(raw_url)
-    params = subst(dict(args.get("params") or {}))
-    headers = subst(dict(args.get("headers") or {}))
-    body = subst(args.get("body"))
+    params = subst(as_obj(args.get("params")))
+    headers = subst(as_obj(args.get("headers")))
+    body = subst(as_obj(args.get("body")))
     if not url.startswith("http"):
         url = cfg.get("base_url", "").rstrip("/") + "/" + url.lstrip("/")
     for k in list(params.keys()):
@@ -413,7 +521,9 @@ def tool_call_api(args):
 
 def dispatch(name, args):
     try:
-        if name == "read_url":
+        if name == "search_docs":
+            out = tool_search_docs(args["query"])
+        elif name == "read_url":
             out = tool_read_url(args["url"])
         elif name == "load_openapi":
             out = tool_load_openapi(args["url"])
@@ -438,22 +548,38 @@ def dispatch(name, args):
 def show_tool(name, args):
     if name == "set_credential":
         label, shown = "🔐 saving a secret", {"name": args.get("name"), "value": "••••••"}
+    elif name == "search_docs":
+        label, shown = f"🌐 searching: {args.get('query')}", args
     elif name == "setup_client":
         label, shown = "🧩 REST client setup", args
     elif name in ("read_url", "load_openapi"):
         label, shown = f"🔎 {name}: {args.get('url')}", args
     else:
         label, shown = f"📡 {args.get('method')} {args.get('url')}", args
-    with st.expander(label):
-        st.json(shown)
+    st.caption(label)
 
 
 # ---------------------------------------------------------------- AI layer
+def assistant_msg(m):
+    """Rebuild the assistant message, keeping extra fields (Gemini thought signatures)."""
+    calls = []
+    for tc in m.tool_calls:
+        d = {
+            "id": tc.id, "type": "function",
+            "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+        }
+        extra = (getattr(tc, "model_extra", None) or {}).get("extra_content")
+        if extra:
+            d["extra_content"] = extra
+        calls.append(d)
+    return {"role": "assistant", "content": m.content or "", "tool_calls": calls}
+
+
 def ask_ai(provider, ai_key, model, base_url, system, history, use_tools=True):
     if provider["type"] == "anthropic":
-        client = anthropic.Anthropic(api_key=ai_key)
+        client = anthropic.Anthropic(api_key=ai_key, timeout=60, max_retries=1)
         msgs = list(history)
-        for _ in range(10):
+        for _ in range(8):
             kwargs = dict(model=model, max_tokens=2500, system=system, messages=msgs)
             if use_tools:
                 kwargs["tools"] = ANTHROPIC_TOOLS
@@ -477,9 +603,9 @@ def ask_ai(provider, ai_key, model, base_url, system, history, use_tools=True):
             msgs.append({"role": "user", "content": results})
         return "(too many steps)"
 
-    client = OpenAI(api_key=ai_key, base_url=base_url or None)
+    client = OpenAI(api_key=ai_key, base_url=base_url or None, timeout=60, max_retries=1)
     msgs = [{"role": "system", "content": system}] + list(history)
-    for _ in range(10):
+    for _ in range(8):
         kwargs = dict(model=model, messages=msgs)
         if use_tools:
             kwargs["tools"] = OPENAI_TOOLS
@@ -487,14 +613,7 @@ def ask_ai(provider, ai_key, model, base_url, system, history, use_tools=True):
         m = r.choices[0].message
         if not m.tool_calls:
             return m.content or ""
-        msgs.append({
-            "role": "assistant",
-            "content": m.content or "",
-            "tool_calls": [{
-                "id": tc.id, "type": "function",
-                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-            } for tc in m.tool_calls],
-        })
+        msgs.append(assistant_msg(m))
         for tc in m.tool_calls:
             args = json.loads(tc.function.arguments or "{}")
             show_tool(tc.function.name, args)
@@ -510,10 +629,15 @@ def build_system():
         "code, explanations), always in the language the user writes in (Bengali if they "
         "write Bengali). On top of that you have tools that let you work with REST APIs "
         "in the backend. "
-        "When the user gives an API documentation link, or asks to connect to some API "
+        "When the user gives an API documentation link or just the name of a website or "
+        "service, or asks to connect to some API "
         "(for example a phone/telephony provider for outbound calls), do the technical "
         "work yourself and do not ask the user to do any technical step: "
-        "1) read_url the link, follow the relevant documentation links, and try "
+        "1) If the user gave only a website or service name (no link), call search_docs "
+        "yourself to find its official API documentation page (queries like "
+        "'<name> API documentation' and '<name> REST API reference'; prefer the official "
+        "domain over blogs) and tell the user in one short line which link you picked. "
+        "Then read_url the link, follow the relevant documentation links, and try "
         "load_openapi, until you know the base URL, the authorization method, and the "
         "exact endpoint, parameters and body format for what the user wants. "
         "2) Call setup_client to save the REST client setup (base URL, auth type, header "
@@ -548,7 +672,7 @@ st.session_state.setdefault("history", [])
 st.session_state.setdefault("credentials", {})
 
 st.title("💬 API Chat Assistant")
-st.caption("সাধারণ চ্যাটের মতো যেকোনো কিছু জিজ্ঞেস করুন। API documentation এর লিংক দিলে আমি পিছনে REST client সেটআপ করব, আর শুধু আপনার API key বা client id চাইব।")
+st.caption("সাধারণ চ্যাটের মতো যেকোনো কিছু জিজ্ঞেস করুন। শুধু ওয়েবসাইট বা সার্ভিসের নাম বললেই হবে, documentation আমি নিজে খুঁজে REST client সেটআপ করব, আর শুধু আপনার API key বা client id চাইব।")
 
 with st.sidebar:
     st.subheader("AI সেটিংস")
@@ -595,8 +719,7 @@ with st.sidebar:
 
 if not st.session_state.history:
     st.info(
-        "যেমন লিখতে পারেন: \"এই documentation দেখে REST client সেটআপ করো, আমি outbound phone call "
-        "করতে চাই: https://...\""
+        "যেমন লিখতে পারেন: \"Twilio দিয়ে REST এ outbound phone call করতে চাই, সেটআপ করে দাও\""
     )
 
 for m in st.session_state.history:
@@ -618,5 +741,6 @@ if user_text:
                                st.session_state.history)
             except Exception as e:
                 final = f"Error: {e}"
+        final = final or "(AI থেকে কোনো উত্তর আসেনি। Model name আর key ঠিক আছে কিনা দেখুন।)"
         st.write(final)
     st.session_state.history.append({"role": "assistant", "content": final})
