@@ -1,6 +1,7 @@
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import json
+import time
 import re
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -560,6 +561,21 @@ def show_tool(name, args):
 
 
 # ---------------------------------------------------------------- AI layer
+def with_retry(fn):
+    """Retry on temporary server errors (429/500/502/503/504) with a short wait."""
+    delays = [2, 5, 10]
+    for i in range(len(delays) + 1):
+        try:
+            return fn()
+        except Exception as e:
+            code = getattr(e, "status_code", None)
+            if code in (429, 500, 502, 503, 504) and i < len(delays):
+                st.caption(f"⏳ AI server ব্যস্ত (error {code}), {delays[i]} সেকেন্ড পরে আবার চেষ্টা করছি...")
+                time.sleep(delays[i])
+                continue
+            raise
+
+
 def assistant_msg(m):
     """Rebuild the assistant message, keeping extra fields (Gemini thought signatures)."""
     calls = []
@@ -583,7 +599,7 @@ def ask_ai(provider, ai_key, model, base_url, system, history, use_tools=True):
             kwargs = dict(model=model, max_tokens=2500, system=system, messages=msgs)
             if use_tools:
                 kwargs["tools"] = ANTHROPIC_TOOLS
-            r = client.messages.create(**kwargs)
+            r = with_retry(lambda: client.messages.create(**kwargs))
             blocks = []
             for b in r.content:
                 if b.type == "text":
@@ -609,7 +625,7 @@ def ask_ai(provider, ai_key, model, base_url, system, history, use_tools=True):
         kwargs = dict(model=model, messages=msgs)
         if use_tools:
             kwargs["tools"] = OPENAI_TOOLS
-        r = client.chat.completions.create(**kwargs)
+        r = with_retry(lambda: client.chat.completions.create(**kwargs))
         m = r.choices[0].message
         if not m.tool_calls:
             return m.content or ""
@@ -741,6 +757,11 @@ if user_text:
                                st.session_state.history)
             except Exception as e:
                 final = f"Error: {e}"
+                if any(c in str(e) for c in ("500", "502", "503", "504")):
+                    final += (
+                        "\n\nএটা AI কোম্পানির সার্ভারের সাময়িক সমস্যা, আপনার key-র দোষ নয়। "
+                        "কিছুক্ষণ পরে আবার চেষ্টা করুন, অথবা সাইডবারে অন্য model নাম দিন।"
+                    )
         final = final or "(AI থেকে কোনো উত্তর আসেনি। Model name আর key ঠিক আছে কিনা দেখুন।)"
         st.write(final)
     st.session_state.history.append({"role": "assistant", "content": final})
